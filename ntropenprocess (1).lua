@@ -207,14 +207,21 @@ local function openReachWindow(secs)
     end
 end
 
+local function isLocalGk()
+    local red = PlayerGui:FindFirstChild("RedGK")
+    if red and red.Value then return true end
+    local blue = PlayerGui:FindFirstChild("BlueGK")
+    if blue and blue.Value then return true end
+    return false
+end
+
 local function canPlay()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("Humanoid") then return false end
     if char.Humanoid.Health <= 0 then return false end
     local activate = PlayerGui:FindFirstChild("Activate")
     if activate and activate.Value == false then return false end
-    if PlayerGui:FindFirstChild("RedGK") and PlayerGui.RedGK.Value then return false end
-    if PlayerGui:FindFirstChild("BlueGK") and PlayerGui.BlueGK.Value then return false end
+    -- GK allowed: Save/Dive reach needs canPlay/canHit while RedGK/BlueGK is true
     return true
 end
 
@@ -222,8 +229,7 @@ local function canHitBall()
     local char = LocalPlayer.Character
     if not char or not char:FindFirstChild("Humanoid") then return false end
     if char.Humanoid.Health <= 0 then return false end
-    if PlayerGui:FindFirstChild("RedGK") and PlayerGui.RedGK.Value then return false end
-    if PlayerGui:FindFirstChild("BlueGK") and PlayerGui.BlueGK.Value then return false end
+    -- Do NOT block GK here. Field-only kick remotes are gated in fireKick via isLocalGk.
     return true
 end
 
@@ -313,6 +319,8 @@ end
 
 local function fireKick(ball)
     if Config.kickFired then return false end
+    -- Kick remotes are field-only; GK uses Module Save/Dive + GetTouchingParts inject
+    if isLocalGk() then return false end
     if not isValidBall(ball) or not canHitBall() then return false end
 
     local backpack = getBackpack()
@@ -742,8 +750,17 @@ local namecallOk, namecallErr = pcall(function()
         if method == "GetTouchingParts" and isHitAssistActive() then
             local results = Hooks.oldNamecall(self, ...)
 
+            -- Limbs always; during Save/Dive/Tackle also allow hitbox-style BaseParts
+            -- (GK Detect often queries non-limb parts, not only R15 limbs).
+            local allowPart = typeof(self) == "Instance"
+                and self:IsA("BasePart")
+                and (
+                    LIMB_NAMES[self.Name]
+                    or Config.actionActive
+                    or isLocalGk()
+                )
 
-            if typeof(self) == "Instance" and LIMB_NAMES[self.Name] then
+            if allowPart then
                 if not resultsHaveTPS(results) then
                     local ball = getTPSBall()
                     if isValidBall(ball) then
@@ -760,6 +777,28 @@ local namecallOk, namecallErr = pcall(function()
                 end
             end
 
+            return results
+        end
+
+        -- Spatial queries used by newer Touch/Save paths (same inject rules).
+        if (method == "GetPartsInPart" or method == "GetPartBoundsInBox" or method == "GetPartBoundsInRadius")
+            and isHitAssistActive()
+        then
+            local results = Hooks.oldNamecall(self, ...)
+            if type(results) == "table" and not resultsHaveTPS(results) then
+                local ball = getTPSBall()
+                if isValidBall(ball) then
+                    local dist = getDistanceToBall(ball)
+                    if isInHitRange(dist) then
+                        local extended = table.create(#results + 1)
+                        for i = 1, #results do
+                            extended[i] = results[i]
+                        end
+                        extended[#results + 1] = ball
+                        return extended
+                    end
+                end
+            end
             return results
         end
 
@@ -821,6 +860,7 @@ local function hookGameModule()
             return function(...)
                 local win = windowSecs or REACH_WINDOW
                 Config.actionActive = true
+                -- Always open window for Save/Dive/Tackle when reach is on (incl. GK)
                 if Config.reachEnabled then
                     openReachWindow(win)
                 end
